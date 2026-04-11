@@ -1,0 +1,33 @@
+.vscode/
+
+# Root secrets and local env
+.env
+.env.local
+.env.*.local
+
+# Backend
+Backend/.env
+Backend/*.log
+Backend/*.err
+Backend/.pytest_cache/
+Backend/.mypy_cache/
+Backend/.ruff_cache/
+Backend/.venv/
+Backend/venv/
+Backend/**/__pycache__/
+Backend/**/*.py[cod]
+
+# Frontend
+Frontend/.env
+Frontend/.env.local
+Frontend/.vite/
+Frontend/dist/
+Frontend/node_modules/
+Frontend/npm-debug.log*
+Frontend/yarn-debug.log*
+Frontend/yarn-error.log*
+Frontend/pnpm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
