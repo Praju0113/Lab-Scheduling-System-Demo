@@ -11,23 +11,23 @@ Parallel PostgreSQL-backed backend for the lab scheduling system.
 - Separate dev seed flow
 
 ## Environment
-Copy `.env.example` to `.env` and set your PostgreSQL connection string.
+Use the repository root `.env` as the source of truth for backend and frontend runtime configuration.
 
 Required:
 - `DATABASE_URL`
+- `BACKEND_CORS_ORIGINS`
 
 Optional:
+- `POSTGRES_PORT=5432`
+- `BACKEND_PORT=8000`
+- `FRONTEND_PORT=5173`
 - `SEED_ON_STARTUP=true`
 - `RESET_DB_ON_STARTUP=true`
-- `BACKEND_CORS_ORIGINS=http://127.0.0.1:5173,http://localhost:5173`
-
-Notes:
-- Local development also accepts common LAN/dev origins such as `localhost`, `127.0.0.1`, `0.0.0.0`, and private network IPs on arbitrary ports.
-- Set `BACKEND_CORS_ORIGINS=*` if you explicitly want to allow every origin.
+- `VITE_API_BASE_URL=http://localhost:8000`
 
 ## Install
 ```cmd
-cd /d "D:\LAB_Sheduling\scalable backend"
+cd /d "D:\LSS-DEMO\Backend"
 C:\Users\praju\miniconda3\Scripts\activate.bat
 conda activate labqs
 pip install -r requirements.txt
@@ -35,8 +35,8 @@ pip install -r requirements.txt
 
 ## Run
 ```cmd
-cd /d "D:\LAB_Sheduling\scalable backend"
+cd /d "D:\LSS-DEMO\Backend"
 C:\Users\praju\miniconda3\Scripts\activate.bat
 conda activate labqs
-python -m uvicorn app.main:application --host 127.0.0.1 --port 8021 --reload
+python -m uvicorn app.main:application --host 0.0.0.0 --port 8000 --reload
 ```

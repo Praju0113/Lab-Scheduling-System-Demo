@@ -6,9 +6,18 @@ const projectRoot = new URL('.', import.meta.url).pathname
 const repoRoot = new URL('../', import.meta.url).pathname
 const srcPath = new URL('./src', import.meta.url).pathname
 
+const getRequiredEnv = (env: Record<string, string>, name: string) => {
+  const value = env[name]?.trim()
+  if (value) {
+    return value
+  }
+  throw new Error(`Missing required environment variable: ${name}`)
+}
+
 export default defineConfig(({ mode }: { mode: string }) => {
   const env = loadEnv(mode, repoRoot, '')
-  const apiTarget = (env.VITE_API_BASE_URL || env.VITE_API_URL || 'http://127.0.0.1:8000').replace(/\/api\/?$/i, '')
+  const apiTarget = (env.VITE_API_BASE_URL || env.VITE_API_URL || getRequiredEnv(env, 'VITE_API_BASE_URL')).replace(/\/api\/?$/i, '')
+  const frontendPort = Number.parseInt(getRequiredEnv(env, 'FRONTEND_PORT'), 10)
 
   return {
     envDir: repoRoot,
@@ -23,7 +32,7 @@ export default defineConfig(({ mode }: { mode: string }) => {
     },
     server: {
       host: '0.0.0.0',
-      port: 5173,
+      port: frontendPort,
       proxy: {
         '/api': {
           target: apiTarget,

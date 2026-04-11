@@ -8,7 +8,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -32,8 +32,9 @@ services:
       BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS}
       SEED_ON_STARTUP: ${SEED_ON_STARTUP}
       RESET_DB_ON_STARTUP: ${RESET_DB_ON_STARTUP}
+      BACKEND_PORT: ${BACKEND_PORT}
     ports:
-      - "8000:8000"
+      - "${BACKEND_PORT}:${BACKEND_PORT}"
     depends_on:
       postgres:
         condition: service_healthy
@@ -52,7 +53,7 @@ services:
     env_file:
       - ./.env
     ports:
-      - "5173:5173"
+      - "${FRONTEND_PORT}:${FRONTEND_PORT}"
     volumes:
       - ./Frontend:/app
       - /app/node_modules
@@ -62,6 +63,7 @@ services:
       - lab_network
     environment:
       VITE_API_BASE_URL: ${VITE_API_BASE_URL}
+      FRONTEND_PORT: ${FRONTEND_PORT}
 
 volumes:
   postgres_data:

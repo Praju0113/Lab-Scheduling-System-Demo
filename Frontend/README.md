@@ -20,10 +20,11 @@ The frontend reads Vite environment variables from the repository root `.env`.
 Example:
 
 ```env
+FRONTEND_PORT=5173
 VITE_API_BASE_URL=http://localhost:8000
 ```
 
-The app also supports `VITE_API_URL`. If no value is provided, it falls back to `/api`.
+The app also supports `VITE_API_URL`, but one of those variables must exist in the repository root `.env`.
 
 ## Install
 ```cmd
@@ -37,7 +38,7 @@ cd /d D:\LSS-DEMO\Frontend
 npm run dev
 ```
 
-Default dev URL:
+Default dev URL when `FRONTEND_PORT=5173`:
 
 ```text
 http://localhost:5173

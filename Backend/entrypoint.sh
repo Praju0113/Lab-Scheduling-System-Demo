@@ -22,4 +22,4 @@ if [ $counter -ge $max_attempts ]; then
 fi
 
 # Start the mounted ASGI application so /socket.io is available
-exec uvicorn app.main:application --host 0.0.0.0 --port 8000 --reload
+exec uvicorn app.main:application --host 0.0.0.0 --port "${BACKEND_PORT:-8000}" --reload

@@ -15,8 +15,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-# Expose the port the backend runs on
+# Expose the default backend port
 EXPOSE 8000
 
 # Run the ASGI wrapper so FastAPI routes and Socket.IO share the same app
-CMD ["sh", "-c", "uvicorn app.main:application --host 0.0.0.0 --port 8000 --reload --workers 1"]
+CMD ["sh", "-c", "uvicorn app.main:application --host 0.0.0.0 --port ${BACKEND_PORT:-8000} --reload --workers 1"]

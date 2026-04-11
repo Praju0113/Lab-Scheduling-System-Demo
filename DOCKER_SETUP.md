@@ -7,7 +7,7 @@
 ## Quick Start
 
 ### Option 1: Using the batch script (Easiest)
-1. Double-click `start-docker.bat` - this will start Docker Desktop and build/run containers
+1. Open a terminal in the repository root and run `docker compose up --build`
 
 ### Option 2: Manual steps
 1. **Start Docker Desktop**
@@ -17,7 +17,7 @@
 
 2. **Open PowerShell/Command Prompt** and navigate to your project root:
    ```bash
-   cd "d:\hosting version 2"
+   cd "D:\LSS-DEMO"
    ```
 
 3. **Build and start all containers:**
@@ -29,10 +29,10 @@
 
 Once all containers are running:
 
-- **Frontend**: http://localhost:5173
-- **Backend API**: http://localhost:8000
-- **API Docs**: http://localhost:8000/docs
-- **Database**: localhost:5432 (PostgreSQL)
+- **Frontend**: `http://<host>:${FRONTEND_PORT}`
+- **Backend API**: `http://<host>:${BACKEND_PORT}`
+- **API Docs**: `http://<host>:${BACKEND_PORT}/docs`
+- **Database**: `<host>:${POSTGRES_PORT}` (PostgreSQL)
 
 ## Common Commands
 
@@ -75,13 +75,13 @@ docker-compose up --build backend
 - Wait for the Docker icon in system tray to show it's ready
 
 ### Port already in use
-- Backend uses port 8000
-- Frontend uses port 5173
-- PostgreSQL uses port 5432
+- Backend uses `BACKEND_PORT`
+- Frontend uses `FRONTEND_PORT`
+- PostgreSQL uses `POSTGRES_PORT`
 
 If these ports are in use, either:
 1. Stop the services using those ports
-2. Modify the ports in `docker-compose.yml`
+2. Modify the port variables in the root `.env`
 
 ### Database connection issues
 - Ensure PostgreSQL container is healthy: `docker-compose ps`
@@ -91,8 +91,8 @@ If these ports are in use, either:
 
 ```
 - postgres (PostgreSQL database)
-- backend (FastAPI - http://localhost:8000)
-- frontend (Vite + React - http://localhost:5173)
+- backend (FastAPI - `http://<host>:${BACKEND_PORT}`)
+- frontend (Vite + React - `http://<host>:${FRONTEND_PORT}`)
 ```
 
 All services are on the `lab_network` bridge for internal communication.
@@ -101,6 +101,7 @@ All services are on the `lab_network` bridge for internal communication.
 
 The `.env` file contains configuration for all services:
 - Database credentials
+- Published ports
 - CORS origins
 - API endpoints
 - Seed data settings
