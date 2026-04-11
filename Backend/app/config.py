@@ -6,9 +6,12 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Only load .env if DATABASE_URL is not already set (from Docker environment)
-if not os.getenv('DATABASE_URL'):
-    load_dotenv(Path(__file__).resolve().parents[1] / '.env')
+REPO_ROOT = Path(__file__).resolve().parents[2]
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+
+# Prefer the repository-level .env so backend and frontend share one source of truth.
+load_dotenv(REPO_ROOT / '.env', override=False)
+load_dotenv(BACKEND_ROOT / '.env', override=False)
 
 
 DEFAULT_CORS_ORIGINS = (
