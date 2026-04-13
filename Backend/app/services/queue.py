@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from app.models import CompletedTestSnapshot, QueueCursor, QueueEntry, QueueEntryType, QueueStatus, TestItem, TestStatus, Visit
+from app.models import CompletedTestSnapshot, QueueEntry, QueueEntryType, QueueStatus, TestItem, TestStatus, Visit
 from app.services.bootstrap import queue_snapshot
 from app.services.patient_ids import patient_id_date
 
@@ -14,14 +14,6 @@ class QueueService:
     def __init__(self, session: Session, scheduler) -> None:
         self.session = session
         self.scheduler = scheduler
-
-    def _get_cursor(self, lab_id: int) -> QueueCursor:
-        cursor = self.session.get(QueueCursor, lab_id)
-        if cursor is None:
-            cursor = QueueCursor(lab_id=lab_id, consecutive_pending_accepts=0)
-            self.session.add(cursor)
-            self.session.flush()
-        return cursor
 
     def _get_entry(self, lab_id: int, queue_type: QueueEntryType) -> QueueEntry | None:
         return self.session.scalar(select(QueueEntry).where(QueueEntry.lab_id == lab_id, QueueEntry.queue_type == queue_type).options(selectinload(QueueEntry.visit), selectinload(QueueEntry.test_item)))
@@ -36,41 +28,28 @@ class QueueService:
         return queue_snapshot(self.session, lab_id)
 
     def accept_current(self, lab_id: int) -> dict:
-        cursor = self._get_cursor(lab_id)
-        current = self._get_entry(lab_id, QueueEntryType.CURRENT)
-        next_entry = self._get_entry(lab_id, QueueEntryType.NEXT)
-        if current is None and next_entry is not None:
-            next_entry.queue_type = QueueEntryType.CURRENT
-            _, test = self._find_test(next_entry.test_item_id)
-            test.status = TestStatus.IN_PROGRESS
-            test.queue_status = QueueStatus.CURRENT
-            cursor.consecutive_pending_accepts = 0
-            self.session.flush()
-            self.scheduler.refill_lab_queue(lab_id)
+        # OR solver handles NEXT queue automatically - no manual refill needed
         self.session.flush()
         return self.snapshot(lab_id)
 
     def move_current_to_pending(self, lab_id: int) -> dict:
         current = self._get_entry(lab_id, QueueEntryType.CURRENT)
-        next_entry = self._get_entry(lab_id, QueueEntryType.NEXT)
-        source = current or next_entry
-        if source is not None:
-            source.queue_type = QueueEntryType.PENDING
-            source.pending_since = datetime.now(timezone.utc)
-            source.returned_at = None
-            _, test = self._find_test(source.test_item_id)
+        if current is not None:
+            current.queue_type = QueueEntryType.PENDING
+            current.pending_since = datetime.now(timezone.utc)
+            current.returned_at = None
+            _, test = self._find_test(current.test_item_id)
             test.status = TestStatus.SCHEDULED
             test.queue_status = QueueStatus.PENDING
-        self.scheduler.refill_lab_queue(lab_id)
         self.session.flush()
         return self.snapshot(lab_id)
 
     def accept_from_pending(self, lab_id: int, visit_test_id: int | None = None) -> dict:
-        cursor = self._get_cursor(lab_id)
+        """Accept a pending patient - OR solver handles fairness via wait-time weighting."""
         if self._get_entry(lab_id, QueueEntryType.CURRENT) is not None:
             return self.snapshot(lab_id)
         pending_items = self.session.scalars(select(QueueEntry).where(QueueEntry.lab_id == lab_id, QueueEntry.queue_type == QueueEntryType.PENDING).options(selectinload(QueueEntry.visit), selectinload(QueueEntry.test_item)).order_by(QueueEntry.returned_at.asc().nullslast(), QueueEntry.pending_since.asc().nullslast(), QueueEntry.created_at.asc())).all()
-        if not pending_items or cursor.consecutive_pending_accepts >= 2:
+        if not pending_items:
             return self.snapshot(lab_id)
         if visit_test_id is not None:
             selected = next((item for item in pending_items if item.test_item_id == visit_test_id), None)
@@ -85,8 +64,6 @@ class QueueService:
         _, test = self._find_test(selected.test_item_id)
         test.status = TestStatus.IN_PROGRESS
         test.queue_status = QueueStatus.CURRENT
-        cursor.consecutive_pending_accepts += 1
-        self.scheduler.refill_lab_queue(lab_id)
         self.session.flush()
         return self.snapshot(lab_id)
 
@@ -111,7 +88,6 @@ class QueueService:
             lab_name=current.lab.name if current.lab else None,
         ))
         self.session.delete(current)
-        self.scheduler.rebuild_for_visit(visit.id, reason='dependency completion')
-        self.scheduler.refill_lab_queue(lab_id)
+        # OR solver automatically handles dependencies on next run
         self.session.flush()
         return self.snapshot(lab_id)

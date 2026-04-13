@@ -5,7 +5,7 @@ from datetime import date
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from app.models import AssignmentHistory, CompletedTestSnapshot, Lab, QueueCursor, QueueEntry, Specialist, TestItem, Visit
+from app.models import AssignmentHistory, CompletedTestSnapshot, ExplicitDependencies, Lab, QueueCursor, QueueEntry, Specialist, TestItem, Visit
 from app.seed_data import DEFAULT_LABS, DEFAULT_SPECIALISTS, build_seed_visits
 from app.services.patient_ids import build_patient_id, patient_id_date
 
@@ -16,9 +16,33 @@ def reset_database(session: Session) -> None:
     session.execute(delete(QueueEntry))
     session.execute(delete(QueueCursor))
     session.execute(delete(TestItem))
+    session.execute(delete(ExplicitDependencies))
     session.execute(delete(Visit))
     session.execute(delete(Lab))
     session.execute(delete(Specialist))
+    session.commit()
+
+
+# Medical test dependencies (recommended sequence, not strict blocking)
+TEST_DEPENDENCIES = [
+    # TMT (Treadmill Test) - Recommended after ECG for baseline vitals
+    {'test_code': 'TMT', 'depends_on_test_code': 'ECG', 'dependency_type': 'recommended_after', 'is_strict': False},
+    # Dual-phase tests - Fasting sample should be done before post-prandial
+    {'test_code': 'Glucose-PostPrandial', 'depends_on_test_code': 'Glucose-Fasting', 'dependency_type': 'must_complete_before', 'is_strict': True},
+    {'test_code': 'Insulin-PostPrandial', 'depends_on_test_code': 'Insulin-Fasting', 'dependency_type': 'must_complete_before', 'is_strict': True},
+    # Urine should be done before Ultrasound if bladder needs to be full
+    {'test_code': 'Ultrasound-Abdomen', 'depends_on_test_code': 'Urine-Examination', 'dependency_type': 'recommended_after', 'is_strict': False},
+]
+
+
+def seed_dependencies(session: Session) -> None:
+    """Seed explicit test dependencies for OR solver."""
+    existing = session.scalar(select(func.count()).select_from(ExplicitDependencies))
+    if existing > 0:
+        return
+    
+    for dep in TEST_DEPENDENCIES:
+        session.add(ExplicitDependencies(**dep))
     session.commit()
 
 
@@ -75,3 +99,4 @@ def seed_database(session: Session, base_date: date | None = None) -> None:
                 condition_category=test_row.get('condition_category'),
             ))
     session.commit()
+    seed_dependencies(session)

@@ -168,3 +168,14 @@ class CompletedTestSnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     test_item = relationship('TestItem', back_populates='completed_snapshots')
+
+
+class ExplicitDependencies(Base):
+    __tablename__ = 'explicit_dependencies'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    test_code: Mapped[str] = mapped_column(String(120), nullable=False, index=True)  # e.g., 'TMT', 'ECG'
+    depends_on_test_code: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    dependency_type: Mapped[str] = mapped_column(String(50), nullable=False, default='must_complete_before')  # 'must_complete_before', 'recommended_after'
+    is_strict: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)  # If True, blocks scheduling; if False, warning only
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

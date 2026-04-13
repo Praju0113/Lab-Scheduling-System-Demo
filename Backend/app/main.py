@@ -19,6 +19,8 @@ from app.services.bootstrap import admin_dashboard_payload, bootstrap_payload, d
 from app.services.patient_ids import build_patient_id, extract_sequence, patient_id_date
 from app.services.queue import QueueService
 from app.services.scheduling import SchedulingService
+from app.services.or_scheduler import ORScheduler
+from app.services.planning_poker import PlanningPokerService, VotingStatus
 
 app = FastAPI(title='Scalable Lab Scheduling Backend')
 app.add_middleware(
@@ -45,8 +47,9 @@ def startup() -> None:
             reset_database(session)
         if settings.seed_on_startup:
             seed_database(session)
-            scheduler = SchedulingService(session)
-            scheduler.schedule_all()
+            # Use OR optimizer for scheduling instead of rule-based SchedulingService
+            or_scheduler = ORScheduler(session)
+            or_scheduler.run_optimization()
             session.commit()
 
 
@@ -431,6 +434,462 @@ async def run_scheduling(db: Session = Depends(get_db)):
     db.commit()
     emit_nowait('dashboard.metrics.updated', admin_dashboard_payload(db))
     return {'message': 'Scheduling refreshed'}
+
+
+# ===== OR Scheduler Endpoints =====
+@app.post('/api/or/optimize')
+async def run_or_optimization(db: Session = Depends(get_db)):
+    """Run OR-Tools optimization to assign tests to labs."""
+    or_scheduler = ORScheduler(db)
+    result = or_scheduler.run_optimization()
+    emit_nowait('dashboard.metrics.updated', admin_dashboard_payload(db))
+    return result
+
+
+@app.get('/api/or/schedule-preview')
+async def get_or_schedule_preview(db: Session = Depends(get_db)):
+    """Preview optimal assignments without applying them."""
+    or_scheduler = ORScheduler(db)
+    assignments = or_scheduler.optimize_schedule()
+    return {
+        'assignments_count': len(assignments),
+        'assignments': assignments,
+        'timestamp': datetime.now().isoformat()
+    }
+
+
+# ===== Planning Poker Endpoints =====
+@app.post('/api/planning-poker/sessions')
+async def create_poker_session(
+    item_type: str,
+    item_id: str,
+    item_name: str,
+    description: str = '',
+    db: Session = Depends(get_db)
+):
+    """Create a new Planning Poker estimation session."""
+    service = PlanningPokerService(db)
+    session = service.create_session(item_type, item_id, item_name, description)
+    return {
+        'session_id': session.id,
+        'item_type': session.item_type,
+        'item_name': session.item_name,
+        'status': session.status,
+        'fibonacci_sequence': service.FIBONACCI_SEQUENCE
+    }
+
+
+@app.get('/api/planning-poker/sessions')
+async def list_poker_sessions(status: VotingStatus | None = None):
+    """List all Planning Poker sessions."""
+    sessions = PlanningPokerService.list_sessions(status)
+    return [
+        {
+            'session_id': s.id,
+            'item_type': s.item_type,
+            'item_name': s.item_name,
+            'status': s.status,
+            'participants': len(s.votes),
+            'created_at': s.created_at.isoformat()
+        }
+        for s in sessions
+    ]
+
+
+@app.post('/api/planning-poker/sessions/{session_id}/join')
+async def join_poker_session(session_id: str, user_id: str, username: str, db: Session = Depends(get_db)):
+    """Join a Planning Poker session."""
+    service = PlanningPokerService(db)
+    try:
+        session = service.join_session(session_id, user_id, username)
+        return {
+            'session_id': session.id,
+            'status': session.status,
+            'participants': [
+                {'user_id': v.user_id, 'username': v.username, 'voted': v.value is not None}
+                for v in session.votes.values()
+            ]
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post('/api/planning-poker/sessions/{session_id}/vote')
+async def cast_poker_vote(session_id: str, user_id: str, value: int, db: Session = Depends(get_db)):
+    """Cast a vote in a Planning Poker session."""
+    service = PlanningPokerService(db)
+    try:
+        session = service.cast_vote(session_id, user_id, value)
+        return {
+            'session_id': session.id,
+            'your_vote': value,
+            'total_votes': len([v for v in session.votes.values() if v.value is not None]),
+            'total_participants': len(session.votes)
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post('/api/planning-poker/sessions/{session_id}/reveal')
+async def reveal_poker_votes(session_id: str, db: Session = Depends(get_db)):
+    """Reveal all votes in a Planning Poker session."""
+    service = PlanningPokerService(db)
+    try:
+        session = service.reveal_votes(session_id)
+        votes = [v.value for v in session.votes.values() if v.value is not None]
+        return {
+            'session_id': session.id,
+            'votes': [
+                {'username': v.username, 'value': v.value}
+                for v in session.votes.values()
+            ],
+            'stats': service.get_session_stats(session_id)
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post('/api/planning-poker/sessions/{session_id}/complete')
+async def complete_poker_session(session_id: str, db: Session = Depends(get_db)):
+    """Complete a Planning Poker session and calculate consensus."""
+    service = PlanningPokerService(db)
+    try:
+        session = service.complete_session(session_id)
+        return {
+            'session_id': session.id,
+            'status': session.status,
+            'final_value': session.final_value,
+            'completed_at': session.completed_at.isoformat() if session.completed_at else None
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get('/api/planning-poker/sessions/{session_id}/stats')
+async def get_poker_session_stats(session_id: str, db: Session = Depends(get_db)):
+    """Get statistics for a Planning Poker session."""
+    service = PlanningPokerService(db)
+    try:
+        return service.get_session_stats(session_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+# ==========================================
+# RE-INTEGRATED: REACT UI ENDPOINTS
+# ==========================================
+
+@app.get('/api/lobby/next')
+def get_next_patients(db: Session = Depends(get_db)):
+    """Get patients waiting for next test assignment (lobby optimization candidates)."""
+    from app.models import TestItem, TestStatus, QueueStatus
+    # Run OR optimization to ensure queue is up-to-date
+    or_scheduler = ORScheduler(db)
+    or_scheduler.run_optimization()
+    # Return tests that are waiting for assignment
+    waiting_tests = db.scalars(
+        select(TestItem)
+        .where(
+            TestItem.status == TestStatus.SCHEDULED,
+            TestItem.queue_status == QueueStatus.WAITING
+        )
+        .options(selectinload(TestItem.visit))
+    ).all()
+    return [
+        {
+            'test_id': t.id,
+            'test_name': t.test_name,
+            'test_code': t.test_code,
+            'visit_id': t.visit_id,
+            'patient_name': t.visit.patient_name,
+            'patient_id': t.visit.public_id,
+            'assigned_lab_id': t.assigned_lab_id,
+            'status': t.queue_status.value
+        }
+        for t in waiting_tests
+    ]
+
+
+@app.get('/api/lobby/pending')
+def get_pending_patients(db: Session = Depends(get_db)):
+    """Get patients in pending state (paused/blocked tests)."""
+    from app.models import TestItem, QueueStatus
+    pending_tests = db.scalars(
+        select(TestItem)
+        .where(TestItem.queue_status == QueueStatus.PENDING)
+        .options(selectinload(TestItem.visit))
+    ).all()
+    return [
+        {
+            'test_id': t.id,
+            'test_name': t.test_name,
+            'test_code': t.test_code,
+            'visit_id': t.visit_id,
+            'patient_name': t.visit.patient_name,
+            'patient_id': t.visit.public_id,
+            'assigned_lab_id': t.assigned_lab_id,
+            'status': t.queue_status.value
+        }
+        for t in pending_tests
+    ]
+
+
+@app.get('/api/labs/{lab_id}/current')
+def get_current_patient_in_lab(lab_id: int, db: Session = Depends(get_db)):
+    """Get the patient currently being processed in a lab."""
+    from app.models import TestItem, QueueStatus
+    test = db.scalar(
+        select(TestItem)
+        .where(
+            TestItem.assigned_lab_id == lab_id,
+            TestItem.queue_status == QueueStatus.CURRENT
+        )
+        .options(selectinload(TestItem.visit))
+    )
+    if not test:
+        raise HTTPException(status_code=404, detail='No patient currently in this lab')
+    return {
+        'test_id': test.id,
+        'test_name': test.test_name,
+        'test_code': test.test_code,
+        'visit_id': test.visit_id,
+        'patient_name': test.visit.patient_name,
+        'patient_id': test.visit.public_id,
+        'status': test.queue_status.value
+    }
+
+
+@app.post('/api/tests/{test_id}/start')
+def start_test(test_id: int, db: Session = Depends(get_db)):
+    """Mark a test as in-progress (specialist started working on it)."""
+    from app.models import TestItem, TestStatus, QueueStatus
+    test = db.get(TestItem, test_id)
+    if not test:
+        raise HTTPException(status_code=404, detail='Test not found')
+    test.status = TestStatus.IN_PROGRESS
+    test.queue_status = QueueStatus.CURRENT
+    db.commit()
+    return {
+        'test_id': test.id,
+        'status': test.status.value,
+        'queue_status': test.queue_status.value
+    }
+
+
+@app.post('/api/tests/{test_id}/complete')
+def complete_test(test_id: int, db: Session = Depends(get_db)):
+    """Mark a test as completed."""
+    from app.models import TestItem, TestStatus, QueueStatus, CompletedTestSnapshot
+    from datetime import datetime, timezone
+    from app.services.patient_ids import patient_id_date
+
+    test = db.scalar(
+        select(TestItem).where(TestItem.id == test_id).options(selectinload(TestItem.visit))
+    )
+    if not test:
+        raise HTTPException(status_code=404, detail='Test not found')
+
+    completed_at = datetime.now(timezone.utc)
+    test.status = TestStatus.COMPLETED
+    test.queue_status = QueueStatus.DONE
+    test.completed_at = completed_at
+
+    # Create snapshot record
+    db.add(CompletedTestSnapshot(
+        snapshot_date=patient_id_date(completed_at),
+        patient_public_id=test.visit.public_id,
+        patient_name=test.visit.patient_name,
+        visit_id=test.visit.id,
+        test_item_id=test.id,
+        test_name=test.test_name,
+        completed_at=completed_at,
+        lab_id=test.assigned_lab_id,
+        lab_name=test.assigned_lab.name if test.assigned_lab else None,
+    ))
+
+    # Delete any existing queue entry
+    queue_entry = db.scalar(select(QueueEntry).where(QueueEntry.test_item_id == test_id))
+    if queue_entry:
+        db.delete(queue_entry)
+
+    db.commit()
+    return {
+        'test_id': test.id,
+        'status': test.status.value,
+        'queue_status': test.queue_status.value,
+        'completed_at': completed_at.isoformat()
+    }
+
+
+@app.post('/api/tests/{test_id}/unblock')
+def unblock_test(test_id: int, db: Session = Depends(get_db)):
+    """Unblock a test and return it to waiting state."""
+    from app.models import TestItem, TestStatus, QueueStatus
+    test = db.get(TestItem, test_id)
+    if not test:
+        raise HTTPException(status_code=404, detail='Test not found')
+    test.status = TestStatus.SCHEDULED
+    test.queue_status = QueueStatus.WAITING
+    test.caution_reason = None
+    db.commit()
+    # Run OR optimization to re-assign
+    or_scheduler = ORScheduler(db)
+    or_scheduler.run_optimization()
+    return {
+        'test_id': test.id,
+        'status': test.status.value,
+        'queue_status': test.queue_status.value
+    }
+
+
+@app.post('/api/tests/{test_id}/pending')
+def specialist_push_to_pending(test_id: int, db: Session = Depends(get_db)):
+    """Push a test to pending state (specialist needs patient to wait)."""
+    from app.models import TestItem, TestStatus, QueueStatus, QueueEntry, QueueEntryType
+    from datetime import datetime, timezone
+
+    test = db.get(TestItem, test_id)
+    if not test:
+        raise HTTPException(status_code=404, detail='Test not found')
+
+    test.status = TestStatus.SCHEDULED
+    test.queue_status = QueueStatus.PENDING
+
+    # Update or create queue entry
+    queue_entry = db.scalar(select(QueueEntry).where(QueueEntry.test_item_id == test_id))
+    if queue_entry:
+        queue_entry.queue_type = QueueEntryType.PENDING
+        queue_entry.pending_since = datetime.now(timezone.utc)
+    else:
+        db.add(QueueEntry(
+            test_item_id=test_id,
+            visit_id=test.visit_id,
+            lab_id=test.assigned_lab_id,
+            queue_type=QueueEntryType.PENDING,
+            pending_since=datetime.now(timezone.utc)
+        ))
+
+    db.commit()
+    return {
+        'test_id': test.id,
+        'status': test.status.value,
+        'queue_status': test.queue_status.value
+    }
+
+
+@app.post('/api/visits/{visit_id}/block')
+def receptionist_block_visit(visit_id: int, db: Session = Depends(get_db)):
+    """Block all tests in a visit (receptionist action)."""
+    from app.models import TestItem, TestStatus, QueueStatus
+    tests = db.scalars(select(TestItem).where(TestItem.visit_id == visit_id)).all()
+    for test in tests:
+        if test.status not in {TestStatus.COMPLETED, TestStatus.IN_PROGRESS}:
+            test.queue_status = QueueStatus.PENDING
+            test.caution_reason = 'Visit blocked by receptionist'
+    db.commit()
+    return {'message': 'Visit blocked', 'visit_id': visit_id}
+
+
+@app.post('/api/visits/{visit_id}/unblock')
+def receptionist_unblock_visit(visit_id: int, db: Session = Depends(get_db)):
+    """Unblock all tests in a visit (receptionist action)."""
+    from app.models import TestItem, TestStatus, QueueStatus
+    tests = db.scalars(select(TestItem).where(TestItem.visit_id == visit_id)).all()
+    for test in tests:
+        if test.queue_status == QueueStatus.PENDING:
+            test.queue_status = QueueStatus.WAITING
+            test.caution_reason = None
+    db.commit()
+    # Run OR optimization to re-assign
+    or_scheduler = ORScheduler(db)
+    or_scheduler.run_optimization()
+    return {'message': 'Visit unblocked', 'visit_id': visit_id}
+
+
+@app.get('/api/frontend/visits')
+def get_frontend_visits(db: Session = Depends(get_db)):
+    """Get all visits for the frontend Patient Records table."""
+    from app.models import TestItem
+    visits = db.scalars(select(Visit).options(selectinload(Visit.tests))).all()
+    result = []
+    for v in visits:
+        test_names = [t.test_name for t in v.tests]
+        # Determine status based on tests
+        if any(t.status == TestStatus.IN_PROGRESS for t in v.tests):
+            status = 'In Progress'
+        elif all(t.status == TestStatus.COMPLETED for t in v.tests):
+            status = 'Completed'
+        elif any(t.queue_status == QueueStatus.PENDING for t in v.tests):
+            status = 'Blocked'
+        else:
+            status = 'Waiting'
+
+        result.append({
+            'id': v.public_id,
+            'visit_id': v.id,
+            'patient_name': v.patient_name,
+            'patient_age': v.patient_age,
+            'patient_gender': v.patient_gender,
+            'phone': v.phone or 'N/A',
+            'priority_type': v.priority_type,
+            'status': status,
+            'arrival_time': v.arrival_time.isoformat(),
+            'tests': test_names
+        })
+    return result
+
+
+@app.post('/api/lims/ingest')
+def ingest_patient_from_lims(payload: VisitPayload, db: Session = Depends(get_db)):
+    """Ingest patient data from LIMS webhook."""
+    # Create visit
+    visit = Visit(
+        public_id=_next_public_id(db, payload.arrival_time),
+        phr_reference_id=payload.phr_reference_id or f'LIMS-{datetime.now().strftime("%Y%m%d%H%M%S%f")}',
+        patient_name=payload.patient_name,
+        patient_age=payload.patient_age,
+        patient_gender=payload.patient_gender,
+        priority_type=payload.priority_type,
+        arrival_time=payload.arrival_time,
+        patient_snapshot=payload.patient_snapshot or {}
+    )
+    db.add(visit)
+    db.flush()
+
+    # Add tests from payload
+    catalog = test_catalog_map()
+    for test_payload in payload.tests:
+        test_name = test_payload.get('test_name')
+        if test_name and test_name in catalog:
+            item = catalog[test_name]
+            status = TestStatus.SCHEDULED
+            queue_status = QueueStatus.WAITING
+            # Example: Mark specific test as pending if needed
+            if test_payload.get('test_code') == 'T0063':
+                queue_status = QueueStatus.PENDING
+
+            db.add(TestItem(
+                visit_id=visit.id,
+                test_code=item['test_code'],
+                test_name=item['test_name'],
+                category=item['category'],
+                duration_minutes=int(item['duration_minutes']),
+                tags=list(item.get('tags', [])),
+                status=status,
+                queue_status=queue_status
+            ))
+
+    db.commit()
+
+    # Run OR optimization for new patient
+    or_scheduler = ORScheduler(db)
+    or_scheduler.run_optimization()
+
+    return {
+        'visit_id': visit.id,
+        'public_id': visit.public_id,
+        'message': 'Patient ingested from LIMS'
+    }
 
 
 application = mount(app)
