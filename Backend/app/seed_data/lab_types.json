@@ -1,0 +1,15 @@
+[
+  { "type_id": 1, "type_name": "Electrocardiogram (ECG)" },
+  { "type_id": 2, "type_name": "Treadmill Test (TMT)" },
+  { "type_id": 3, "type_name": "Ultrasound Scan" },
+  { "type_id": 4, "type_name": "2D Echocardiogram (2D Echo)" },
+  { "type_id": 5, "type_name": "Mammography" },
+  { "type_id": 6, "type_name": "Dual-Energy X-ray Absorptiometry (DEXA) Scan" },
+  { "type_id": 7, "type_name": "X-Ray Imaging" },
+  { "type_id": 8, "type_name": "Pure Tone Audiometry" },
+  { "type_id": 9, "type_name": "Ophthalmology Examination" },
+  { "type_id": 10, "type_name": "Pap Smear Test" },
+  { "type_id": 11, "type_name": "Urine Examination" },
+  { "type_id": 12, "type_name": "Stool Examination" },
+  { "type_id": 13, "type_name": "Blood Test" }
+]

@@ -1,0 +1,153 @@
+[
+  {
+    "test_category": "Dual-Phase (Done Twice)",
+    "input_condition": "1st Sample: before food. 2nd Sample: 2 hours after a meal or stimulant.",
+    "output_effect": "",
+    "tests": [
+      "Glucose - Fasting & Post Prandial",
+      "Insulin Fasting & PP",
+      "C-Peptide Fasting & PP",
+      "Insulin & Glucose - Post Prandial",
+      "Fasting Insulin & Glucose",
+      "ACTH Stimulation for 17OHP",
+      "Growth Hormone Stimulation Test",
+      "Synacthen Stimulation Test",
+      "Renin Activity (Supine/Upright)",
+      "Aldosterone/Plasma Renin Activity Ratio"
+    ]
+  },
+  {
+    "test_category": "Multi-Sample (GTT)",
+    "input_condition": "Strict fasting; Vitals normal",
+    "output_effect": "",
+    "tests": [
+      "GTT 3 Samples",
+      "GTT Extended (5 samples)",
+      "Glucose Tolerance Test (Gestational) 3hrs/4 samples",
+      "C-Peptide Response to Glucose (5 hours)",
+      "Glucose Challenge Test (1Hr/2Hr samples)"
+    ]
+  },
+  {
+    "test_category": "Strict Fasting Blood",
+    "input_condition": "preferred first because strict fasting (water only); Vitals normal.",
+    "output_effect": "",
+    "tests": [
+      "Lipid Profile (Total, HDL, LDL, VLDL, Triglycerides)",
+      "Iron Profile (Iron, TIBC, Transferrin Saturation, Ferritin)",
+      "Homocysteine level",
+      "Vitamin A",
+      "Vitamin E",
+      "Growth Hormone level",
+      "Gastrin Level",
+      "Bile Acid",
+      "Apolipoprotein A-1+B",
+      "Free Fatty Acid levels",
+      "Adiponectin",
+      "11-deoxy cortisol",
+      "Aldosterone level"
+    ]
+  },
+  {
+    "test_category": "Imaging (Full Bladder)",
+    "input_condition": "Bladder needs to be full.",
+    "output_effect": "",
+    "tests": [
+      "Ultrasound Scan (General/Pelvic)"
+    ]
+  },
+  {
+    "test_category": "Imaging (General)",
+    "input_condition": "",
+    "output_effect": "",
+    "tests": [
+      "Mammography",
+      "Dual-Energy X-ray Absorptiometry (DEXA) Scan",
+      "X-Ray Imaging"
+    ]
+  },
+  {
+    "test_category": "Urine - Spot (Full Bladder)",
+    "input_condition": "Bladder needs to be full.",
+    "output_effect": "Bladder gets empty after test.",
+    "tests": [
+      "Urine Examination",
+      "Urine Glucose (Random/Fasting/PP)",
+      "Pregnancy Test",
+      "Microalbumin Level",
+      "Chyluria",
+      "Osmolality Urine",
+      "All Drug Screens (Cocaine, Morphine, THC, etc.)",
+      "Bence Jones Protein",
+      "Reducing Substances",
+      "Ketones",
+      "Urobilinogen",
+      "Urinary Sodium/Potassium/Calcium/Chloride (Spot)",
+      "Legonella Antigen",
+      "Cryptosporidium Antigen"
+    ]
+  },
+  {
+    "test_category": "Urine - 24 Hour / Timed",
+    "input_condition": "Bladder needs to be full.",
+    "output_effect": "Bladder gets empty after test.",
+    "tests": [
+      "24-hr Urinary Protein",
+      "24-hr Creatinine Clearance",
+      "24-hr Catecholamine",
+      "24-hr VMA",
+      "24-hr Cortisol",
+      "24-hr Porphyrins",
+      "24-hr Heavy Metal Analysis (Lead, Mercury, Zinc, etc.)",
+      "24-hr Calcium/Oxalate/Citrate/Magnesium",
+      "17–KETOSTEROIDS",
+      "5-HIAA",
+      "Homovanillic Acid (HVA)",
+      "Serotonin Level-Urine",
+      "Porphobilinogen (24hr)"
+    ]
+  },
+  {
+    "test_category": "Physical & Stress Tests",
+    "input_condition": "TMT Preferred last; Vitals at rest for ECG/Echo/PFT.",
+    "output_effect": "TMT: Heartbeat and BP increase. PFT: Temporary breathlessness.",
+    "tests": [
+      "TMT (Treadmill Test)",
+      "ECG",
+      "2D Echocardiogram (2D Echo)",
+      "Audiometry-Test",
+      "Ophthalmology Examination",
+      "Digital Retinal screening",
+      "GYNAEC. EXAM",
+      "Spirometry-PFT",
+      "Oximetry",
+      "Physician Examination",
+      "Fitness Certificate"
+    ]
+  },
+  {
+    "test_category": "Procedure Required (Body Fluids/Swabs)",
+    "input_condition": "Vitals should be normal;",
+    "output_effect": "",
+    "tests": [
+      "CSF Tests: Routine, Glucose, Protein, ADA, Viral antibodies, Beta HCG, TPHA",
+      "Body Fluid Tests: Amylase, Bilirubin, Cholesterol, Creatinine, Electrolytes, LDH, PTH, Phosphorus, Protein, Urea, Uric Acid, Thyroglobulin",
+      "Swabs/Cultures: Pyogenic/Aerobic/Anaerobic Cultures, High Vaginal Swab, Throat Swab, Sputum (AFB Culture/Stain), Albert/Gram/ZN Stains, OT Surveillance"
+    ]
+  },
+  {
+    "test_category": "Standard Single-Draw Blood Tests",
+    "input_condition": "Vitals should be normal;",
+    "output_effect": "",
+    "tests": [
+      "Genetic/NGS: WGS, WES, BRCA1&2, NIPT, HLA Typing, Karyotyping, FISH Panels, JAK2, FLT3, NPM1, CFTR, SMA, DMD, PMP22, Fragile X",
+      "Allergy: Food/Inhalant/Dust Panels, Specific IgE (Egg, Milk, Peanut, Shrimp, etc.)",
+      "Infectious Disease: HIV, HCV, HBV, Dengue, Malaria, Typhoid, TB, COVID-19 PCR, TORCH, Viral Panels",
+      "Immunity/Autoimmune: ANA 25, Anti-dsDNA, Rheumatoid Factor, CRP, ESR, ASLO, Complement C3/C4, Myositis Profile, SLE Panel, Anti-CCP",
+      "Vitamins/Hormones: Vit B12, D, B Complex, C, Folate, TSH, T3, T4, Cortisol, Testosterone, Prolactin, AMH, FSH, LH, Insulin",
+      "Tumor Markers: CA-125, PSA, CEA, AFP, CA-19-9, HE4, NSE",
+      "TDM: Lithium, Valproic acid, Tacrolimus, Digoxin, Dilantin, Cyclosporine",
+      "Routine: CBC/Haemogram, LFT, KFT/RFT, Uric Acid, Creatinine, Electrolytes, CPK, Troponin I/T, BNP, Blood Group"
+    ]
+  }
+]
