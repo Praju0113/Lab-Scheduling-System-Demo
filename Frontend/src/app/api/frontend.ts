@@ -166,4 +166,16 @@ export const frontendApi = {
     const response = await apiClient.post(`/queues/${stripPrefixedId(labId)}/complete-current`);
     return response.data;
   },
+  seedLimsPatients: async () => {
+    const response = await apiClient.post('/seed/lims-patients', {});
+    return response.data;
+  },
+  seedMockSpecialists: async () => {
+    const response = await apiClient.post('/seed/specialists', {});
+    return response.data;
+  },
+  seedMockLabs: async () => {
+    const response = await apiClient.post('/seed/labs', {});
+    return response.data;
+  },
 };

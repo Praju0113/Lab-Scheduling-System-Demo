@@ -101,6 +101,7 @@ class TestItem(Base):
     assigned_lab_id: Mapped[int | None] = mapped_column(ForeignKey('labs.id', ondelete='SET NULL'), index=True)
     sequence_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     caution_reason: Mapped[str | None] = mapped_column(Text)
+    is_blocked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)

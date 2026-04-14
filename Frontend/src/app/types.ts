@@ -2,7 +2,7 @@ import type { DefinedLabCategory } from './constants/labCategories';
 
 export type LabCategory = DefinedLabCategory | string;
 
-export type VisitStatus = 'Waiting' | 'Pending' | 'Completed';
+export type VisitStatus = 'Waiting' | 'Pending' | 'Blocked' | 'Completed';
 export type Gender = 'Male' | 'Female' | 'Other';
 export type PriorityType = 'NORMAL' | 'EMERGENCY';
 

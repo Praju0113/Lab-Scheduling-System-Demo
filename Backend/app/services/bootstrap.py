@@ -47,6 +47,9 @@ def frontend_visit(visit: Visit) -> dict:
     if all(test.status == TestStatus.COMPLETED for test in visit.tests):
         status = 'Completed'
         completed_at = max((test.completed_at for test in visit.tests if test.completed_at), default=None)
+    elif any(test.is_blocked for test in visit.tests):
+        status = 'Blocked'
+        completed_at = None
     elif any(test.queue_status == QueueStatus.PENDING for test in visit.tests):
         status = 'Pending'
         completed_at = None
@@ -117,9 +120,17 @@ def frontend_test_catalog() -> list[dict]:
 
 
 def waiting_candidates_payload(session: Session, lab_id: int) -> dict:
-    scheduler = SchedulingService(session)
+    """Get eligible waiting candidates for a specific lab."""
     lab_names = {lab.id: lab.name for lab in session.scalars(select(Lab)).all()}
     visits = session.scalars(select(Visit).options(selectinload(Visit.tests)).order_by(Visit.arrival_time.asc(), Visit.id.asc())).all()
+    
+    def check_dependencies_satisfied(visit: Visit, test: TestItem) -> bool:
+        """Check if all prior tests for this visit are completed."""
+        # Find all tests in the same visit with lower sequence_order
+        prior_tests = [t for t in visit.tests if t.sequence_order < test.sequence_order]
+        # All prior tests must be completed
+        return all(t.status == TestStatus.COMPLETED for t in prior_tests)
+    
     items: list[dict] = []
     for visit in visits:
         active_test = next((test for test in visit.tests if test.queue_status in {QueueStatus.WAITING, QueueStatus.CURRENT, QueueStatus.PENDING}), None)
@@ -127,9 +138,11 @@ def waiting_candidates_payload(session: Session, lab_id: int) -> dict:
         for test in ordered_tests:
             if test.assigned_lab_id != lab_id:
                 continue
-            if test.status != TestStatus.SCHEDULED or test.queue_status != QueueStatus.NOT_QUEUED:
+            if test.status != TestStatus.SCHEDULED or test.queue_status != QueueStatus.WAITING:
                 continue
-            dependencies_satisfied = scheduler._dependencies_satisfied(visit, test)
+            if test.is_blocked:
+                continue
+            dependencies_satisfied = check_dependencies_satisfied(visit, test)
             is_queue_eligible = active_test is None and dependencies_satisfied
             items.append({
                 'visit_id': visit.public_id,

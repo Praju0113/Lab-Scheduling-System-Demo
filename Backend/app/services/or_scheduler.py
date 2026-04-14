@@ -11,7 +11,7 @@ from ortools.sat.python import cp_model
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Lab, Specialist, TestItem, Visit
+from app.models import Lab, QueueEntryType, Specialist, TestItem, Visit
 
 if TYPE_CHECKING:
     pass
@@ -62,13 +62,14 @@ class ORScheduler:
         ).all()
 
     def get_pending_tests(self) -> list[TestItem]:
-        """Get all tests that need scheduling (SCHEDULED status)."""
+        """Get all tests that need scheduling (SCHEDULED status), excluding blocked tests."""
         from app.models import TestItem, TestStatus, QueueStatus
         return self.db.scalars(
             select(TestItem)
             .where(
                 TestItem.status == TestStatus.SCHEDULED,
-                TestItem.queue_status == QueueStatus.NOT_QUEUED
+                TestItem.queue_status == QueueStatus.WAITING,
+                TestItem.is_blocked == False
             )
         ).all()
 
@@ -141,8 +142,8 @@ class ORScheduler:
         score += category_weight
 
         # Wait time bonus (longer wait = higher priority)
-        arrival_naive = visit.arrival_time.replace(tzinfo=None)
-        wait_minutes = (datetime.now() - arrival_naive).total_seconds() / 60
+        # Use timezone-aware calculation to avoid UTC/local mismatch
+        wait_minutes = (datetime.now().astimezone() - visit.arrival_time).total_seconds() / 60
         score += int(wait_minutes * 10)  # 10 points per minute waited
 
         return score
@@ -173,10 +174,15 @@ class ORScheduler:
             if specialist and specialist.gender != 'Female':
                 return False
 
-        # Check if test category matches lab category
-        # Using lab_type mapping from database
-        if lab.category != test_item.category:
-            return False
+        # Check if lab has specific supported_test_codes
+        # If so, test_code must be in that list
+        if lab.supported_test_codes:
+            if test_item.test_code not in lab.supported_test_codes:
+                return False
+        else:
+            # Otherwise, check if test category matches lab category
+            if lab.category != test_item.category:
+                return False
 
         return True
 
@@ -266,7 +272,8 @@ class ORScheduler:
                     # Latest possible end time for the test
                     latest_end = min(shift_end_dt, lab_close_dt)
                     # Estimated start time (now or arrival time)
-                    est_start = max(now, visit.arrival_time.replace(tzinfo=None))
+                    # Use timezone-aware comparison
+                    est_start = max(datetime.now().astimezone(), visit.arrival_time)
                     # Test must fit: start + duration + cleanup <= end time
                     total_duration = test.duration_minutes + lab.cleanup_duration_minutes
                     est_end = est_start + timedelta(minutes=total_duration)
@@ -275,30 +282,36 @@ class ORScheduler:
                         model.Add(x[(test.id, lab.id)] == 0)
 
         # Constraint 5: One Place at a Time Rule
-        # A patient cannot have multiple tests IN_PROGRESS or WAITING across different labs
-        # Get active tests for each patient (already in progress or waiting)
+        # A patient cannot be at multiple labs simultaneously
+        # If patient is currently at a lab, they can only be assigned to that same lab
         from app.models import TestStatus, QueueStatus
-        active_tests_by_patient = {}
+        current_lab_by_patient = {}
         for test in tests:
             visit = self.db.get(Visit, test.visit_id)
-            if visit.id not in active_tests_by_patient:
-                # Check for existing active tests for this patient
-                active_existing = self.db.scalars(
+            if visit.id not in current_lab_by_patient:
+                # Check if patient is currently at a specific lab (IN_PROGRESS or CURRENT)
+                current_test = self.db.scalar(
                     select(TestItem)
                     .where(
                         TestItem.visit_id == visit.id,
-                        TestItem.status.in_([TestStatus.IN_PROGRESS]),
-                        TestItem.queue_status.in_([QueueStatus.CURRENT, QueueStatus.WAITING])
+                        TestItem.status == TestStatus.IN_PROGRESS,
+                        TestItem.queue_status == QueueStatus.CURRENT,
+                        TestItem.assigned_lab_id.isnot(None)
                     )
-                ).all()
-                active_tests_by_patient[visit.id] = len(active_existing)
+                )
+                if current_test:
+                    current_lab_by_patient[visit.id] = current_test.assigned_lab_id
+                else:
+                    current_lab_by_patient[visit.id] = None
 
         for test in tests:
             visit = self.db.get(Visit, test.visit_id)
-            if active_tests_by_patient.get(visit.id, 0) > 0:
-                # Patient already has active tests, can't assign new ones
+            patient_current_lab = current_lab_by_patient.get(visit.id)
+            if patient_current_lab is not None:
+                # Patient is currently at a lab, can only assign to that same lab
                 for lab in labs:
-                    model.Add(x[(test.id, lab.id)] == 0)
+                    if lab.id != patient_current_lab:
+                        model.Add(x[(test.id, lab.id)] == 0)
 
         # Constraint 6: Lab capacity (one test at a time per lab)
         for lab in labs:
@@ -348,29 +361,51 @@ class ORScheduler:
         """
         Apply the optimized schedule to the database.
         Updates test assignments and creates queue entries.
+        Ensures each patient has only ONE NEXT test at a time.
+        Other tests remain assigned but unqueued until their predecessor completes.
         """
         from app.models import TestItem, QueueEntry, QueueEntryType, QueueStatus
         
+        # First pass: assign labs to all tests
         for test_id, lab_id in assignments.items():
             test_item = self.db.get(TestItem, test_id)
             if test_item:
-                # Update assignment
                 test_item.assigned_lab_id = lab_id
-                test_item.queue_status = QueueStatus.WAITING
-                
-                # Create queue entry
+        
+        # Second pass: create NEXT queue entries (only one per patient)
+        # Track which patients already have a NEXT entry
+        patients_with_next = set()
+        
+        # Find all existing NEXT entries
+        existing_next_entries = self.db.scalars(
+            select(QueueEntry).where(QueueEntry.queue_type == QueueEntryType.NEXT)
+        ).all()
+        for entry in existing_next_entries:
+            patients_with_next.add(entry.visit_id)
+        
+        # Create NEXT entries only for tests whose patients don't have one yet
+        # Process in order of assignment (which respects dependencies)
+        assigned_tests = [self.db.get(TestItem, tid) for tid in assignments.keys()]
+        assigned_tests.sort(key=lambda t: t.id)  # Stable ordering
+        
+        for test_item in assigned_tests:
+            if test_item and test_item.visit_id not in patients_with_next:
+                # This patient doesn't have a NEXT test yet, check if this one exists
                 existing = self.db.scalar(
-                    select(QueueEntry).where(QueueEntry.test_item_id == test_id)
+                    select(QueueEntry).where(QueueEntry.test_item_id == test_item.id)
                 )
                 if not existing:
-                    queue_entry = QueueEntry(
-                        lab_id=lab_id,
-                        visit_id=test_item.visit_id,
-                        test_item_id=test_id,
-                        queue_type=QueueEntryType.PENDING,
-                        position=None
-                    )
-                    self.db.add(queue_entry)
+                    # Only add NEXT entry if dependencies are satisfied
+                    if self.check_dependency_satisfied(test_item):
+                        queue_entry = QueueEntry(
+                            lab_id=test_item.assigned_lab_id,
+                            visit_id=test_item.visit_id,
+                            test_item_id=test_item.id,
+                            queue_type=QueueEntryType.NEXT,
+                            position=None
+                        )
+                        self.db.add(queue_entry)
+                        patients_with_next.add(test_item.visit_id)
 
         self.db.commit()
 

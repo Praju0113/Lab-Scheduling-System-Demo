@@ -105,6 +105,7 @@ export function useRealTimeUpdates() {
         socketConnectedRef.current = false;
         schedulePoll();
         if (!cancelled) {
+          if (retryTimer) window.clearTimeout(retryTimer);
           retryTimer = window.setTimeout(connectRealtime, 5000);
         }
       });
