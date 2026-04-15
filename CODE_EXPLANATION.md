@@ -72,7 +72,7 @@ async def create_frontend_patient(payload: FrontendPatientPayload, db: Session =
 
 When a test is in WAITING state with `assigned_lab_id=null`, the OR solver considers it. After assign­ment, it stays WAITING but `assigned_lab_id` is filled with the lab number. Test is now queued to that lab.
 
----
+--- 
 
 ### 2. `Backend/app/services/or_scheduler.py` - The Brain
 

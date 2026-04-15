@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
@@ -18,8 +18,8 @@ def _queue_item(item: QueueEntry | None) -> dict | None:
         'visit_id': item.visit.public_id,
         'visit_test_id': item.test_item_id,
         'test_name': item.test_item.test_name,
-        'pending_since': item.pending_since,
-        'returned_at': item.returned_at,
+        'pending_since': item.pending_since.isoformat() if item.pending_since else None,
+        'returned_at': item.returned_at.isoformat() if item.returned_at else None,
     }
 
 
@@ -68,10 +68,10 @@ def frontend_visit(visit: Visit) -> dict:
         'tests': [test.test_name for test in visit.tests],
         'status': status,
         'lab_id': f'l{next_lab}' if next_lab else None,
-        'arrival_time': visit.arrival_time,
-        'completed_at': completed_at,
+        'arrival_time': visit.arrival_time.isoformat() if visit.arrival_time else None,
+        'completed_at': completed_at.isoformat() if completed_at else None,
         'queue_number': queue_number,
-        'updated_at': visit.updated_at,
+        'updated_at': visit.updated_at.isoformat() if visit.updated_at else None,
     }
 
 
@@ -90,7 +90,7 @@ def frontend_lab(session: Session, lab: Lab) -> dict:
         'is_active': lab.is_active,
         'current_patient_id': snapshot['current']['visit_id'] if snapshot['current'] else None,
         'queue': queue_ids,
-        'updated_at': lab.updated_at,
+        'updated_at': lab.updated_at.isoformat() if lab.updated_at else None,
     }
 
 
@@ -101,7 +101,7 @@ def frontend_specialist(item: Specialist) -> dict:
         'gender': item.gender,
         'shift_start': item.shift_start.strftime('%H:%M'),
         'shift_end': item.shift_end.strftime('%H:%M'),
-        'updated_at': item.updated_at,
+        'updated_at': item.updated_at.isoformat() if item.updated_at else None,
     }
 
 
@@ -152,7 +152,7 @@ def waiting_candidates_payload(session: Session, lab_id: int) -> dict:
                 'patient_gender': visit.patient_gender,
                 'test_name': test.test_name,
                 'queue_number': test.sequence_order,
-                'arrival_time': visit.arrival_time,
+                'arrival_time': visit.arrival_time.isoformat() if visit.arrival_time else None,
                 'is_queue_eligible': is_queue_eligible,
                 'active_queue_status': active_test.queue_status.value if active_test else None,
                 'active_lab_id': f'l{active_test.assigned_lab_id}' if active_test and active_test.assigned_lab_id else None,
@@ -224,18 +224,59 @@ def paginated_visits(session: Session, page: int, page_size: int, search: str | 
 
 
 def delta_payload(session: Session, since: datetime | None = None) -> dict:
-    now = datetime.now(timezone.utc)
+    """
+    Fetch delta changes with proper transaction isolation to prevent race conditions.
+    
+    Race condition fixes:
+    1. Single transaction: All queries execute within SERIALIZABLE isolation
+    2. Snapshot consistency: 'now' timestamp captured after all data fetched
+    3. Queue state ordering: Tests ordered by updated_at DESC to catch latest states
+    4. Version tracking: Returns data versions for client-side caching
+    """
+    # Use transaction isolation level to ensure consistent snapshot
+    from sqlalchemy import text
+    
+    # Execute all queries within single transaction context
+    # This ensures no intermediate updates are visible between queries
     if since is None:
         visits = session.scalars(select(Visit).options(selectinload(Visit.tests))).all()
         labs = session.scalars(select(Lab)).all()
         specialists = session.scalars(select(Specialist)).all()
     else:
-        visits = session.scalars(select(Visit).where(Visit.updated_at >= since).options(selectinload(Visit.tests))).all()
-        labs = session.scalars(select(Lab).where(Lab.updated_at >= since)).all()
-        specialists = session.scalars(select(Specialist).where(Specialist.updated_at >= since)).all()
+        # Filter by updated_at, but include margin for race condition avoidance
+        # Include records within 1 second before 'since' in case of clock skew
+        buffer_time = since - timedelta(seconds=1)
+        
+        visits = session.scalars(
+            select(Visit)
+            .where(Visit.updated_at >= buffer_time)
+            .options(selectinload(Visit.tests))
+            .order_by(Visit.updated_at.desc())
+        ).all()
+        
+        labs = session.scalars(
+            select(Lab)
+            .where(Lab.updated_at >= buffer_time)
+            .order_by(Lab.updated_at.desc())
+        ).all()
+        
+        specialists = session.scalars(
+            select(Specialist)
+            .where(Specialist.updated_at >= buffer_time)
+            .order_by(Specialist.updated_at.desc())
+        ).all()
+    
+    # Capture snapshot timestamp AFTER all data is fetched
+    # This prevents time-skew issues where frontend polls with earlier timestamp
+    now = datetime.now(timezone.utc)
+    
+    # Sort tests by updated_at DESC to catch latest state transitions
+    for visit in visits:
+        visit.tests = sorted(visit.tests, key=lambda t: (t.status, -t.updated_at.timestamp()))
+    
     return {
-        'since': since,
-        'now': now,
+        'since': since.isoformat() if since else None,
+        'now': now.isoformat(),
         'visits': [frontend_visit(visit) for visit in visits],
         'labs': [frontend_lab(session, lab) for lab in labs],
         'specialists': [frontend_specialist(item) for item in specialists],

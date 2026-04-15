@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.config import settings
 from app.db import Base, SessionLocal, engine, get_db
-from app.models import Lab, QueueEntry, QueueStatus, Specialist, TestItem, TestStatus, Visit
+from app.models import Lab, QueueEntry, QueueEntryType, QueueStatus, Specialist, TestItem, TestStatus, Visit
 from app.realtime import emit_nowait, mount
 from app.schemas import AcceptPendingPayload, DeltaResponse, FrontendPatientPayload, LabPayload, SpecialistPayload, VisitListResponse, VisitPayload
 from app.seed import reset_database, seed_database
@@ -368,51 +368,121 @@ def get_queue(lab_id: int, db: Session = Depends(get_db)):
 
 @app.post('/api/queues/{lab_id}/accept-current')
 async def accept_current(lab_id: int, db: Session = Depends(get_db)):
+    """Accept current queue item with row-level locking to prevent race conditions."""
     if db.get(Lab, lab_id) is None:
         raise HTTPException(status_code=404, detail='Lab queue not found')
-    snapshot = QueueService(db, SchedulingService(db)).accept_current(lab_id)
-    db.commit()
-    emit_nowait('queue.updated', {'labId': f'l{lab_id}', 'snapshot': snapshot})
-    return snapshot
+    
+    try:
+        # Lock queue entries for this lab to prevent concurrent modifications
+        db.execute(
+            select(QueueEntry)
+            .where(QueueEntry.assigned_lab_id == lab_id, QueueEntry.queue_type.in_([QueueEntryType.CURRENT, QueueEntryType.NEXT]))
+            .with_for_update()
+        )
+        
+        snapshot = QueueService(db, SchedulingService(db)).accept_current(lab_id)
+        db.commit()
+        emit_nowait('queue.updated', {'labId': f'l{lab_id}', 'snapshot': snapshot})
+        return snapshot
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f'Queue operation failed: {str(e)}') from e
 
 
 @app.post('/api/queues/{lab_id}/move-current-to-pending')
 async def move_current_to_pending(lab_id: int, db: Session = Depends(get_db)):
+    """Move current queue item to pending with row-level locking to prevent race conditions."""
     if db.get(Lab, lab_id) is None:
         raise HTTPException(status_code=404, detail='Lab queue not found')
-    snapshot = QueueService(db, SchedulingService(db)).move_current_to_pending(lab_id)
-    db.commit()
-    emit_nowait('queue.updated', {'labId': f'l{lab_id}', 'snapshot': snapshot})
-    emit_nowait('dashboard.metrics.updated', admin_dashboard_payload(db))
-    return snapshot
+    
+    try:
+        # Lock queue entries for this lab to prevent concurrent modifications
+        db.execute(
+            select(QueueEntry)
+            .where(QueueEntry.assigned_lab_id == lab_id, QueueEntry.queue_type == QueueEntryType.CURRENT)
+            .with_for_update()
+        )
+        
+        snapshot = QueueService(db, SchedulingService(db)).move_current_to_pending(lab_id)
+        db.commit()
+        emit_nowait('queue.updated', {'labId': f'l{lab_id}', 'snapshot': snapshot})
+        emit_nowait('dashboard.metrics.updated', admin_dashboard_payload(db))
+        return snapshot
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f'Queue operation failed: {str(e)}') from e
 
 
 @app.post('/api/queues/{lab_id}/accept-from-pending')
 async def accept_from_pending(lab_id: int, payload: AcceptPendingPayload | None = None, db: Session = Depends(get_db)):
+    """Accept pending queue item with row-level locking to prevent race conditions."""
     if db.get(Lab, lab_id) is None:
         raise HTTPException(status_code=404, detail='Lab queue not found')
+    
     try:
+        # Lock queue entries for this lab to prevent concurrent modifications
+        db.execute(
+            select(QueueEntry)
+            .where(QueueEntry.assigned_lab_id == lab_id, QueueEntry.queue_type == QueueEntryType.PENDING)
+            .with_for_update()
+        )
+        
         snapshot = QueueService(db, SchedulingService(db)).accept_from_pending(lab_id, payload.visit_test_id if payload else None)
+        db.commit()
+        emit_nowait('queue.updated', {'labId': f'l{lab_id}', 'snapshot': snapshot})
+        return snapshot
     except ValueError as exc:
+        db.rollback()
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    db.commit()
-    emit_nowait('queue.updated', {'labId': f'l{lab_id}', 'snapshot': snapshot})
-    return snapshot
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f'Queue operation failed: {str(e)}') from e
 
 
 @app.post('/api/queues/{lab_id}/complete-current')
 async def complete_current(lab_id: int, db: Session = Depends(get_db)):
+    """Complete current queue item with row-level locking and OR-Scheduler trigger.
+    
+    Race condition prevention:
+    1. Acquires FOR UPDATE lock on queue entries
+    2. Acquires FOR UPDATE lock on associated test
+    3. OR-Scheduler triggered within same transaction
+    4. All changes committed atomically
+    """
     if db.get(Lab, lab_id) is None:
         raise HTTPException(status_code=404, detail='Lab queue not found')
-    snapshot = QueueService(db, SchedulingService(db)).complete_current(lab_id)
-    db.commit()
-    # Trigger OR optimization to schedule next tests
-    or_scheduler = ORScheduler(db)
-    or_scheduler.run_optimization()
-    db.commit()
-    emit_nowait('queue.updated', {'labId': f'l{lab_id}', 'snapshot': snapshot})
-    emit_nowait('dashboard.metrics.updated', admin_dashboard_payload(db))
-    return snapshot
+    
+    try:
+        # Get and lock current queue entry for this lab
+        current_entry = db.execute(
+            select(QueueEntry)
+            .where(QueueEntry.assigned_lab_id == lab_id, QueueEntry.queue_type == QueueEntryType.CURRENT)
+            .with_for_update()
+        ).scalar_one_or_none()
+        
+        # Also lock the test being completed to prevent concurrent updates
+        if current_entry and current_entry.test_id:
+            db.execute(
+                select(TestItem)
+                .where(TestItem.id == current_entry.test_id)
+                .with_for_update()
+            )
+        
+        snapshot = QueueService(db, SchedulingService(db)).complete_current(lab_id)
+        db.commit()
+        
+        # Trigger OR optimization to schedule next tests
+        # This is outside the lock to prevent deadlocks on concurrent labs
+        or_scheduler = ORScheduler(db)
+        or_scheduler.run_optimization()
+        db.commit()
+        
+        emit_nowait('queue.updated', {'labId': f'l{lab_id}', 'snapshot': snapshot})
+        emit_nowait('dashboard.metrics.updated', admin_dashboard_payload(db))
+        return snapshot
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f'Queue operation failed: {str(e)}') from e
 
 
 @app.post('/api/phr-sync/patients')

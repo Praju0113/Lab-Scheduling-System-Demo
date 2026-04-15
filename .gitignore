@@ -5,6 +5,23 @@
 .env.local
 .env.*.local
 
+# Generated debug and analysis files (created during development)
+*_ANALYSIS.md
+*_SUMMARY.md
+*_PLAN.md
+*_FIX.md
+CRITICAL_BUGS_AND_*.md
+DATABASE_*.md
+SYNC_*.md
+IMPORT_*.md
+QUEUE_*.md
+SCHEDULER_*.md
+SCENARIO_*.md
+CODE_EXPLANATION_*.md
+
+# Temporary pasted files
+Frontend/src/imports/pasted_text/
+
 # Backend
 Backend/.env
 Backend/*.log

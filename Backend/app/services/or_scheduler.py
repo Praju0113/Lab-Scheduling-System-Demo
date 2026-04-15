@@ -4,17 +4,24 @@ Optimizes patient flow through labs using mathematical constraints.
 """
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta
-from typing import TYPE_CHECKING
+from datetime import datetime, time, timedelta, date, timezone
+from sqlalchemy.exc import IntegrityError
 
 from ortools.sat.python import cp_model
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Lab, QueueEntryType, Specialist, TestItem, Visit
-
-if TYPE_CHECKING:
-    pass
+from app.models import (
+    ExplicitDependencies,
+    Lab,
+    QueueEntry,
+    QueueEntryType,
+    QueueStatus,
+    Specialist,
+    TestItem,
+    TestStatus,
+    Visit,
+)
 
 
 class TestConstraints:
@@ -56,26 +63,40 @@ class ORScheduler:
 
     def get_active_labs(self) -> list[Lab]:
         """Get all active labs with their specialists."""
-        from app.models import Lab
         return self.db.scalars(
             select(Lab).where(Lab.is_active == True)
         ).all()
 
     def get_pending_tests(self) -> list[TestItem]:
-        """Get all tests that need scheduling (SCHEDULED status), excluding blocked tests."""
-        from app.models import TestItem, TestStatus, QueueStatus
+        """Get all tests that need scheduling (SCHEDULED status), excluding blocked tests.
+        
+        FIX 1.1: Uses FOR UPDATE lock to serialize concurrent optimization requests
+        and prevent race conditions when creating queue entries.
+        
+        CRITICAL FIX: Exclude tests that already have:
+        - An assigned lab (awaiting queue entry)
+        - A queue entry (NEXT, CURRENT, or PENDING)
+        
+        This prevents re-fetching and re-assigning the same tests multiple times,
+        which was causing only first 1-2 patients to get scheduled.
+        """
+        # Subquery: Find test IDs that already have queue entries
+        has_queue_entry = select(QueueEntry.test_item_id)
+        
         return self.db.scalars(
             select(TestItem)
             .where(
                 TestItem.status == TestStatus.SCHEDULED,
                 TestItem.queue_status == QueueStatus.WAITING,
-                TestItem.is_blocked == False
+                TestItem.is_blocked == False,
+                TestItem.assigned_lab_id.is_(None),  # Not yet assigned to any lab
+                ~TestItem.id.in_(has_queue_entry)  # No queue entry (NEXT, CURRENT, PENDING)
             )
+            .with_for_update()  # Lock these rows to prevent concurrent modifications
         ).all()
 
     def get_test_dependencies(self, test_code: str) -> list[str]:
         """Get list of test codes that must complete before this test."""
-        from app.models import ExplicitDependencies
         deps = self.db.scalars(
             select(ExplicitDependencies.depends_on_test_code)
             .where(
@@ -88,8 +109,6 @@ class ORScheduler:
 
     def check_dependency_satisfied(self, test_item: TestItem) -> bool:
         """Check if all dependencies for a test are completed."""
-        from app.models import ExplicitDependencies, TestItem as TestItemModel, TestStatus
-        
         # Get dependencies from ExplicitDependencies table
         deps = self.db.scalars(
             select(ExplicitDependencies)
@@ -105,16 +124,64 @@ class ORScheduler:
         for dep in deps:
             # Check if the dependent test is completed
             completed = self.db.scalar(
-                select(TestItemModel)
+                select(TestItem)
                 .where(
-                    TestItemModel.visit_id == test_item.visit_id,
-                    TestItemModel.test_code == dep.depends_on_test_code,
-                    TestItemModel.status == TestStatus.COMPLETED
+                    TestItem.visit_id == test_item.visit_id,
+                    TestItem.test_code == dep.depends_on_test_code,
+                    TestItem.status == TestStatus.COMPLETED
                 )
             )
             if not completed:
                 return False
         return True
+
+    def detect_unschedulable_tests(self, tests: list[TestItem], labs: list[Lab]) -> set[int]:
+        """FIX 2.3: Detect tests that cannot be scheduled due to:
+        - No compatible labs
+        - Unsatisfiable dependencies
+        - Constraint conflicts
+        
+        Returns set of unschedulable test IDs.
+        """
+        unschedulable = set()
+        
+        for test in tests:
+            # Check 1: Can any lab accept this test?
+            visit = self.db.get(Visit, test.visit_id)
+            compatible_labs = [
+                lab for lab in labs 
+                if self.check_lab_compatibility(test, lab, visit)
+            ]
+            if not compatible_labs:
+                unschedulable.add(test.id)
+                continue
+            
+            # Check 2: Are dependencies satisfiable?
+            deps = self.get_test_dependencies(test.test_code)
+            for dep_code in deps:
+                # Find if any test with dep_code exists for this patient
+                dep_test = self.db.scalar(
+                    select(TestItem)
+                    .where(
+                        TestItem.visit_id == test.visit_id,
+                        TestItem.test_code == dep_code
+                    )
+                )
+                if dep_test:
+                    # Dependency exists, check if IT can be scheduled
+                    if dep_test.id in unschedulable:
+                        unschedulable.add(test.id)
+                        break
+                    # Check if dep_test can reach any compatible lab
+                    dep_compatible_labs = [
+                        lab for lab in labs 
+                        if self.check_lab_compatibility(dep_test, lab, self.db.get(Visit, dep_test.visit_id))
+                    ]
+                    if not dep_compatible_labs:
+                        unschedulable.add(test.id)
+                        break
+        
+        return unschedulable
 
     def calculate_priority_score(self, visit: Visit, test_item: TestItem) -> int:
         """
@@ -158,7 +225,6 @@ class ORScheduler:
         Check if a test can be performed at a lab.
         Returns True if compatible (acts as binary multiplier in OR).
         """
-        from app.models import Specialist
         
         # Check lab is active
         if not lab.is_active:
@@ -221,14 +287,24 @@ class ORScheduler:
         """
         Main OR optimization function.
         Returns optimal assignments as {test_item_id: lab_id}.
+        
+        FIX 1.3: Re-validates assignments after solving to catch patient movements
+        during the optimization window.
         """
         model = cp_model.CpModel()
         
         # Get data
         labs = self.get_active_labs()
-        tests = self.get_pending_tests()
+        all_tests = self.get_pending_tests()
 
-        if not tests or not labs:
+        if not all_tests or not labs:
+            return {}
+
+        # FIX 2.3: Detect and exclude unschedulable tests
+        unschedulable = self.detect_unschedulable_tests(all_tests, labs)
+        tests = [t for t in all_tests if t.id not in unschedulable]
+        
+        if not tests:
             return {}
 
         # Create decision variables: x[test_id][lab_id] = 1 if test assigned to lab
@@ -257,34 +333,32 @@ class ORScheduler:
 
         # Constraint 4: Time Window Fitting (shift end, lab closing, cleanup)
         # A test must fit within specialist shift and lab hours
-        now = datetime.now()
-        from datetime import date
-        today = date.today()
+        # FIX 2.2: Use timezone-aware datetimes for accurate comparisons
+        now = datetime.now(timezone.utc).astimezone()  # Local timezone
+        local_date = now.replace(hour=0, minute=0, second=0, microsecond=0).date()
+        
         for test in tests:
             visit = self.db.get(Visit, test.visit_id)
             for lab in labs:
                 specialist = self.db.get(Specialist, lab.specialist_id)
                 if specialist:
-                    # Check if test fits within shift end time
-                    # Combine date with time for comparison
-                    shift_end_dt = datetime.combine(today, specialist.shift_end)
-                    lab_close_dt = datetime.combine(today, lab.closing_time)
+                    # Combine date with shift times, using same timezone as 'now'
+                    shift_end_dt = datetime.combine(local_date, specialist.shift_end, tzinfo=now.tzinfo)
+                    lab_close_dt = datetime.combine(local_date, lab.closing_time, tzinfo=now.tzinfo)
                     # Latest possible end time for the test
                     latest_end = min(shift_end_dt, lab_close_dt)
-                    # Estimated start time (now or arrival time)
-                    # Use timezone-aware comparison
-                    est_start = max(datetime.now().astimezone(), visit.arrival_time)
+                    # Estimated start time (now or arrival time, whichever is later)
+                    est_start = max(now, visit.arrival_time)
                     # Test must fit: start + duration + cleanup <= end time
                     total_duration = test.duration_minutes + lab.cleanup_duration_minutes
                     est_end = est_start + timedelta(minutes=total_duration)
-                    if est_end.time() > latest_end.time():
+                    if est_end > latest_end:
                         # Test doesn't fit in time window
                         model.Add(x[(test.id, lab.id)] == 0)
 
         # Constraint 5: One Place at a Time Rule
         # A patient cannot be at multiple labs simultaneously
         # If patient is currently at a lab, they can only be assigned to that same lab
-        from app.models import TestStatus, QueueStatus
         current_lab_by_patient = {}
         for test in tests:
             visit = self.db.get(Visit, test.visit_id)
@@ -314,8 +388,24 @@ class ORScheduler:
                         model.Add(x[(test.id, lab.id)] == 0)
 
         # Constraint 6: Lab capacity (one test at a time per lab)
+        # FIX: Account for tests already assigned to this lab waiting or in-progress
+        # This prevents double-assignment and ensures proper queuing
         for lab in labs:
-            model.Add(sum(x[(test.id, lab.id)] for test in tests) <= 1)
+            # Count tests already assigned to this lab that haven't completed
+            existing_assigned_tests = self.db.scalars(
+                select(TestItem).where(
+                    TestItem.assigned_lab_id == lab.id,
+                    TestItem.status.in_([TestStatus.SCHEDULED, TestStatus.IN_PROGRESS]),
+                    TestItem.is_blocked == False
+                )
+            ).all()
+            existing_assigned = len(existing_assigned_tests)
+            
+            new_assignments = sum(x[(test.id, lab.id)] for test in tests)
+            
+            # Lab can only accept new assignments if it's currently free
+            # Capacity = 1, so if existing_assigned=1, new_assignments must be 0
+            model.Add(new_assignments <= (1 - existing_assigned))
 
         # Objective function: Maximize priority scores, minimize movement
         objective_terms = []
@@ -346,16 +436,42 @@ class ORScheduler:
         
         status = solver.Solve(model)
 
+        assignments = {}
         if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
-            assignments = {}
             for test in tests:
                 for lab in labs:
                     if solver.Value(x[(test.id, lab.id)]) == 1:
                         assignments[test.id] = lab.id
                         break
-            return assignments
 
-        return {}  # No feasible solution
+        # FIX 1.3: Re-validate assignments after solving
+        # Check if patient moved to different lab during optimization window
+        validated_assignments = {}
+        for test_id, assigned_lab_id in assignments.items():
+            test_item = self.db.get(TestItem, test_id)
+            if not test_item:
+                continue
+            
+            visit = self.db.get(Visit, test_item.visit_id)
+            
+            # Check: Is patient currently at a different lab?
+            current_test = self.db.scalar(
+                select(TestItem)
+                .where(
+                    TestItem.visit_id == visit.id,
+                    TestItem.status == TestStatus.IN_PROGRESS,
+                    TestItem.queue_status == QueueStatus.CURRENT,
+                    TestItem.assigned_lab_id.isnot(None)
+                )
+            )
+            
+            if current_test and current_test.assigned_lab_id != assigned_lab_id:
+                # Patient moved! Skip this assignment
+                continue
+            
+            validated_assignments[test_id] = assigned_lab_id
+
+        return validated_assignments
 
     def apply_schedule(self, assignments: dict) -> None:
         """
@@ -363,14 +479,21 @@ class ORScheduler:
         Updates test assignments and creates queue entries.
         Ensures each patient has only ONE NEXT test at a time.
         Other tests remain assigned but unqueued until their predecessor completes.
-        """
-        from app.models import TestItem, QueueEntry, QueueEntryType, QueueStatus
         
-        # First pass: assign labs to all tests
+        FIX 1.4: Validates test status before assignment to prevent corrupting completed tests.
+        FIX 1.2: Uses try-catch for atomic QueueEntry creation.
+        """
+        
+        # First pass: assign labs to all tests with status validation
+        # FIX 1.4: Only update if test is still SCHEDULED (not completed)
         for test_id, lab_id in assignments.items():
             test_item = self.db.get(TestItem, test_id)
-            if test_item:
+            if test_item and test_item.status == TestStatus.SCHEDULED:
                 test_item.assigned_lab_id = lab_id
+                test_item.queue_status = QueueStatus.WAITING
+        
+        # Flush to persist assignments before creating queue entries
+        self.db.flush()
         
         # Second pass: create NEXT queue entries (only one per patient)
         # Track which patients already have a NEXT entry
@@ -397,15 +520,23 @@ class ORScheduler:
                 if not existing:
                     # Only add NEXT entry if dependencies are satisfied
                     if self.check_dependency_satisfied(test_item):
-                        queue_entry = QueueEntry(
-                            lab_id=test_item.assigned_lab_id,
-                            visit_id=test_item.visit_id,
-                            test_item_id=test_item.id,
-                            queue_type=QueueEntryType.NEXT,
-                            position=None
-                        )
-                        self.db.add(queue_entry)
-                        patients_with_next.add(test_item.visit_id)
+                        # FIX 1.2: Try-catch for atomic check-and-create
+                        # If another process created this entry, we gracefully skip
+                        try:
+                            queue_entry = QueueEntry(
+                                lab_id=test_item.assigned_lab_id,
+                                visit_id=test_item.visit_id,
+                                test_item_id=test_item.id,
+                                queue_type=QueueEntryType.NEXT,
+                                position=None
+                            )
+                            self.db.add(queue_entry)
+                            self.db.flush()  # Flush to detect constraint violations early
+                            patients_with_next.add(test_item.visit_id)
+                        except IntegrityError as e:
+                            # Another process already created this QueueEntry - that's OK
+                            self.db.rollback()
+                            patients_with_next.add(test_item.visit_id)
 
         self.db.commit()
 

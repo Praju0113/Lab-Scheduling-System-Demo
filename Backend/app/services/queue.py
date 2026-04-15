@@ -28,12 +28,30 @@ class QueueService:
         return queue_snapshot(self.session, lab_id)
 
     def accept_current(self, lab_id: int) -> dict:
-        # OR solver handles NEXT queue automatically - no manual refill needed
+        """Accept next patient to current if no current patient exists. Move NEXT → CURRENT."""
+        # Check if CURRENT exists
+        current = self._get_entry(lab_id, QueueEntryType.CURRENT)
+        
+        # If no current patient, accept NEXT patient
+        if current is None:
+            next_item = self._get_entry(lab_id, QueueEntryType.NEXT)
+            if next_item is not None:
+                next_item.queue_type = QueueEntryType.CURRENT
+                _, test = self._find_test(next_item.test_item_id)
+                test.status = TestStatus.IN_PROGRESS
+                test.queue_status = QueueStatus.CURRENT
+        
         self.session.flush()
         return self.snapshot(lab_id)
 
     def move_current_to_pending(self, lab_id: int) -> dict:
+        """Move current (or next if no current) to pending. CURRENT/NEXT → PENDING."""
         current = self._get_entry(lab_id, QueueEntryType.CURRENT)
+        
+        # If no current patient, move NEXT to PENDING instead
+        if current is None:
+            current = self._get_entry(lab_id, QueueEntryType.NEXT)
+        
         if current is not None:
             current.queue_type = QueueEntryType.PENDING
             current.pending_since = datetime.now(timezone.utc)
